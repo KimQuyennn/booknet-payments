@@ -167,3 +167,86 @@ app.listen(PORT, () => {
     console.log(`🌐 Server đang chạy tại port ${PORT}`);
     console.log(`🌐 Domain public: ${RENDER_URL}`);
 });
+
+app.post('/pay-author', async (req, res) => {
+    try {
+        const { userId, totalXuVIP } = req.body;
+        if (!userId || !totalXuVIP) return res.status(400).send("Thiếu dữ liệu");
+
+        // Lấy tác giả
+        const userSnapshot = await db.ref(`Users/${userId}`).once('value');
+        const user = userSnapshot.val();
+        if (!user || !user.paypalEmail) return res.status(400).send("Tác giả chưa có PayPal");
+
+        // Quy đổi xu sang USD và 65% cho tác giả
+        const usd = ((totalXuVIP * 0.65) / 100).toFixed(2); // 1 USD = 100 xu
+
+        const create_payment_json = {
+            intent: 'sale',
+            payer: { payment_method: 'paypal' },
+            redirect_urls: {
+                return_url: `${RENDER_URL}/success-author?userId=${userId}&amount=${usd}`,
+                cancel_url: `${RENDER_URL}/cancel`,
+            },
+            transactions: [{
+                item_list: { items: [{ name: 'Thanh toán quyền lợi tác giả', price: usd, currency: 'USD', quantity: 1 }] },
+                amount: { currency: 'USD', total: usd },
+                payee: { email: user.paypalEmail },
+                description: `Thanh toán quyền lợi tác giả ${user.Username}`,
+            }],
+        };
+
+        paypal.payment.create(create_payment_json, (error, payment) => {
+            if (error) {
+                console.error(error);
+                return res.status(500).send("Lỗi tạo thanh toán PayPal");
+            }
+            const approvalUrl = payment.links.find(link => link.rel === 'approval_url');
+            res.json({ paymentUrl: approvalUrl.href });
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).send("Lỗi server khi thanh toán tác giả");
+    }
+});
+
+app.get('/success-author', async (req, res) => {
+    const { PayerID: payerId, paymentId, userId, amount } = req.query;
+
+    const execute_payment_json = {
+        payer_id: payerId,
+        transactions: [{ amount: { currency: 'USD', total: amount } }],
+    };
+
+    paypal.payment.execute(paymentId, execute_payment_json, async (error, payment) => {
+        if (error) return res.send('❌ Thanh toán thất bại');
+
+        // ===== Cập nhật sách đã thanh toán =====
+        const booksRef = db.ref("Books");
+        const booksSnapshot = await booksRef.once('value');
+        const books = booksSnapshot.val() || {};
+
+        for (const [bookId, book] of Object.entries(books)) {
+            if (book.UploaderId === userId && book.IsVIP && !book.IsPaid) {
+                await db.ref(`Books/${bookId}`).update({ IsPaid: true });
+            }
+        }
+
+        // ===== Thêm thông báo cho tác giả =====
+        const notifRef = db.ref(`Notifications/${userId}`);
+        const newNotif = {
+            createdAt: Date.now(),
+            message: `Người quản trị đã thanh toán quyền lợi của bạn (${amount} USD)`,
+            read: false,
+            title: "Bạn vừa nhận tiền từ sách VIP",
+            type: "author_payment",
+        };
+        await notifRef.push(newNotif);
+
+        res.send(`
+      <h2>Thanh toán quyền lợi tác giả thành công!</h2>
+      <p>Số tiền: $${amount} đã chuyển vào PayPal của tác giả.</p>
+      <a href="booknet://home">Quay lại ứng dụng</a>
+    `);
+    });
+});
