@@ -23,8 +23,8 @@ paypal.configure({
     client_secret: process.env.PAYPAL_CLIENT_SECRET,
 });
 
-// --- Ngrok public URL ---
-const NGROK_URL = "https://bernadette-nonoccult-brecken.ngrok-free.dev"; // thay bằng URL ngrok hiện tại
+// --- Render public URL (KHÔNG DÙNG NGROK NỮA) ---
+const RENDER_URL = "https://booknet-payments.onrender.com";
 
 // --- Tạo thanh toán ---
 app.post('/create-payment', (req, res) => {
@@ -34,8 +34,8 @@ app.post('/create-payment', (req, res) => {
         intent: 'sale',
         payer: { payment_method: 'paypal' },
         redirect_urls: {
-            return_url: `${NGROK_URL}/success?userId=${userId}&amount=${amount}`,
-            cancel_url: `${NGROK_URL}/cancel`,
+            return_url: `${RENDER_URL}/success?userId=${userId}&amount=${amount}`,
+            cancel_url: `${RENDER_URL}/cancel`,
         },
         transactions: [{
             item_list: { items: [{ name: 'Nạp xu Booknet', price: amount, currency: 'USD', quantity: 1 }] },
@@ -55,7 +55,6 @@ app.post('/create-payment', (req, res) => {
     });
 });
 
-// --- Xử lý thanh toán thành công ---
 // --- Xử lý thanh toán thành công ---
 app.get('/success', async (req, res) => {
     const { PayerID: payerId, paymentId, userId, amount } = req.query;
@@ -94,7 +93,7 @@ app.get('/success', async (req, res) => {
 
         await db.ref("Payments").push(paymentRecord);
 
-        // ======== GHI LỊCH SỬ GIAO DỊCH (transaction log) ========
+        // ======== GHI LỊCH SỬ GIAO DỊCH ========
         const transactionRecord = {
             type: "topup",
             method: "paypal",
@@ -106,7 +105,7 @@ app.get('/success', async (req, res) => {
 
         await db.ref(`Transactions/${userId}`).push(transactionRecord);
 
-        // Trang thành công đẹp
+        // Trang thành công
         res.send(`
             <!DOCTYPE html>
             <html lang="vi">
@@ -159,13 +158,12 @@ app.get('/success', async (req, res) => {
     });
 });
 
-
-// --- Xử lý khi hủy thanh toán ---
+// --- Hủy thanh toán ---
 app.get('/cancel', (req, res) => res.send('Bạn đã hủy thanh toán!'));
 
 // --- Khởi động server ---
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🌐 Server đang chạy tại http://localhost:${PORT}`);
-    console.log(`🌐 Ngrok URL công khai: ${NGROK_URL}`);
+    console.log(`🌐 Server đang chạy tại port ${PORT}`);
+    console.log(`🌐 Domain public: ${RENDER_URL}`);
 });
