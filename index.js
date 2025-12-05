@@ -8,7 +8,8 @@ const app = express();
 app.use(bodyParser.json());
 
 // --- Firebase Admin ---
-const serviceAccount = require('./serviceAccountKey.json');
+const serviceAccount = require('/etc/secrets/serviceAccountKey.json');
+
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
     databaseURL: "https://docsach-2e95b-default-rtdb.firebaseio.com/"
