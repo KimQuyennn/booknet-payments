@@ -1,3 +1,15 @@
+function filterSummaryByRole(summary, role) {
+    if (role === "admin") return summary;
+
+    // User chỉ thấy dữ liệu KHÔNG NHẠY CẢM
+    return {
+        books: summary.books,
+        chapters: summary.chapters,
+        interactions: summary.interactions,
+        usersReading: summary.usersReading
+    };
+}
+
 const express = require('express');
 const paypal = require('paypal-rest-sdk');
 const admin = require('firebase-admin');
@@ -9,6 +21,14 @@ app.use(bodyParser.json());
 
 // --- Firebase Admin ---
 const serviceAccount = require('/etc/secrets/serviceAccountKey.json');
+const OpenAI = require("openai");
+
+const openai = new OpenAI({
+    apiKey: process.env.OPENAI_API_KEY
+});
+const cors = require("cors");
+app.use(cors());
+
 
 admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -168,85 +188,240 @@ app.listen(PORT, () => {
     console.log(`🌐 Domain public: ${RENDER_URL}`);
 });
 
-app.post('/pay-author', async (req, res) => {
+function summarizeData({
+    books,
+    chapters,
+    comments,
+    ratings,
+    favorites,
+    readingHistory,
+    payments,
+    avatarFrames
+}) {
+    const bookList = Object.values(books || {});
+    const commentList = Object.values(comments || {});
+    const ratingList = Object.values(ratings || {});
+    const paymentList = Object.values(payments || {});
+    const historyList = Object.values(readingHistory || {});
+    const frameList = Object.values(avatarFrames || {});
+
+    return {
+        books: {
+            total: bookList.length,
+            vip: bookList.filter(b => b.IsVIP).length,
+            paid: bookList.filter(b => b.IsPaid).length,
+            completed: bookList.filter(b => b.IsCompleted).length,
+            topViewed: bookList
+                .sort((a, b) => (b.Views || 0) - (a.Views || 0))
+                .slice(0, 5)
+                .map(b => b.Title)
+        },
+
+        chapters: {
+            total: Object.keys(chapters || {}).length
+        },
+
+        interactions: {
+            comments: commentList.length,
+            ratings: ratingList.length,
+            favorites: Object.keys(favorites || {}).length
+        },
+
+        usersReading: {
+            totalRecords: historyList.length,
+            completedBooks: historyList.filter(h => h.IsCompleted).length
+        },
+
+        revenue: {
+            totalUSD: paymentList.reduce((sum, p) => sum + (p.amount || 0), 0),
+            totalXu: paymentList.reduce((sum, p) => sum + (p.xuReceived || 0), 0),
+            totalPayments: paymentList.length
+        },
+
+        avatarFrames: {
+            total: frameList.length,
+            vip: frameList.filter(f => f.Type === "vip").length,
+            normal: frameList.filter(f => f.Type === "thuong").length
+        }
+    };
+}
+
+app.post("/ai-ask", async (req, res) => {
+    const { question, userId } = req.body;
+
+    if (!question || !userId) {
+        return res.status(400).json({ error: "Thiếu question hoặc userId" });
+    }
+
     try {
-        const { userId, totalXuVIP } = req.body;
-        if (!userId || !totalXuVIP) return res.status(400).send("Thiếu dữ liệu");
+        // ===== 1. LẤY ROLE TỪ FIREBASE =====
+        const userSnap = await db.ref(`Users/${userId}`).once("value");
+        const userData = userSnap.val();
 
-        // Lấy tác giả
-        const userSnapshot = await db.ref(`Users/${userId}`).once('value');
-        const user = userSnapshot.val();
-        if (!user || !user.paypalEmail) return res.status(400).send("Tác giả chưa có PayPal");
+        if (!userData) {
+            return res.status(404).json({ error: "User không tồn tại" });
+        }
 
-        // Quy đổi xu sang USD và 65% cho tác giả
-        const usd = ((totalXuVIP * 0.65) / 100).toFixed(2); // 1 USD = 100 xu
+        const role = userData.Role || "user";
 
-        const create_payment_json = {
-            intent: 'sale',
-            payer: { payment_method: 'paypal' },
-            redirect_urls: {
-                return_url: `${RENDER_URL}/success-author?userId=${userId}&amount=${usd}`,
-                cancel_url: `${RENDER_URL}/cancel`,
-            },
-            transactions: [{
-                item_list: { items: [{ name: 'Thanh toán quyền lợi tác giả', price: usd, currency: 'USD', quantity: 1 }] },
-                amount: { currency: 'USD', total: usd },
-                payee: { email: user.paypalEmail },
-                description: `Thanh toán quyền lợi tác giả ${user.Username}`,
-            }],
-        };
+        // ===== 2. LOAD DỮ LIỆU =====
+        const [
+            booksSnap,
+            chaptersSnap,
+            commentsSnap,
+            ratingsSnap,
+            favoritesSnap,
+            historySnap,
+            paymentsSnap,
+            avatarFramesSnap
+        ] = await Promise.all([
+            db.ref("Books").once("value"),
+            db.ref("Chapters").once("value"),
+            db.ref("Comments").once("value"),
+            db.ref("Ratings").once("value"),
+            db.ref("Favorites").once("value"),
+            db.ref("ReadingHistory").once("value"),
+            db.ref("Payments").once("value"),
+            db.ref("AvatarFrames").once("value")
+        ]);
 
-        paypal.payment.create(create_payment_json, (error, payment) => {
-            if (error) {
-                console.error(error);
-                return res.status(500).send("Lỗi tạo thanh toán PayPal");
-            }
-            const approvalUrl = payment.links.find(link => link.rel === 'approval_url');
-            res.json({ paymentUrl: approvalUrl.href });
+        const summary = summarizeData({
+            books: booksSnap.val(),
+            chapters: chaptersSnap.val(),
+            comments: commentsSnap.val(),
+            ratings: ratingsSnap.val(),
+            favorites: favoritesSnap.val(),
+            readingHistory: historySnap.val(),
+            payments: paymentsSnap.val(),
+            avatarFrames: avatarFramesSnap.val()
         });
+
+        // ===== 3. LỌC THEO ROLE =====
+        let filteredSummary = filterSummaryByRole(summary, role);
+
+        // ===== 4. THÊM TÍNH NĂNG “WOW” =====
+        if (role === "user") {
+            // Gợi ý 5 sách dựa trên lịch sử đọc + topViewed + favorites
+            const historyList = Object.values(historySnap.val() || {});
+            const favoriteList = Object.values(favoritesSnap.val() || {});
+
+            const readBookIds = historyList.map(h => h.BookId);
+            const favoriteBookIds = favoriteList.map(f => f.BookId);
+
+            const allBooks = Object.values(booksSnap.val() || {});
+
+            // Gợi ý sách chưa đọc, ưu tiên favorite + topViewed
+            const suggestions = allBooks
+                .filter(b => !readBookIds.includes(b.Id))
+                .sort((a, b) => {
+                    const scoreA = (favoriteBookIds.includes(a.Id) ? 50 : 0) + (a.Views || 0);
+                    const scoreB = (favoriteBookIds.includes(b.Id) ? 50 : 0) + (b.Views || 0);
+                    return scoreB - scoreA;
+                })
+                .slice(0, 5)
+                .map(b => b.Title);
+
+            filteredSummary.suggestedBooks = suggestions;
+        }
+
+        if (role === "admin") {
+            // Cảnh báo ví dụ:
+            const warnings = [];
+            const totalUSD = summary.revenue.totalUSD;
+
+            // Sách VIP ít đọc
+            const vipLowRead = Object.values(booksSnap.val() || {}).filter(b => b.IsVIP && (b.Views || 0) < 10);
+            if (vipLowRead.length) warnings.push(`Có ${vipLowRead.length} sách VIP ít lượt đọc.`);
+
+            // Doanh thu thấp
+            if (totalUSD < 50) warnings.push(`Doanh thu tuần này thấp: $${totalUSD}.`);
+
+            // Tác giả nổi bật (nhiều người tặng xu)
+            const payments = Object.values(paymentsSnap.val() || {});
+            const xuTặngTheoTacGia = {};
+            payments.forEach(p => {
+                if (p.toAuthorId) {
+                    xuTặngTheoTacGia[p.toAuthorId] = (xuTặngTheoTacGia[p.toAuthorId] || 0) + (p.xuReceived || 0);
+                }
+            });
+            const topAuthors = Object.entries(xuTặngTheoTacGia)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([authorId, xu]) => `Tác giả ${authorId} nhận ${xu} xu`);
+
+            filteredSummary.adminWarnings = { warnings, topAuthors };
+        }
+
+        // ===== 5. SYSTEM PROMPT =====
+        const systemPrompt = getSystemPrompt(role);
+
+        // ===== 6. GỌI AI =====
+        const completion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+                { role: "system", content: systemPrompt },
+                {
+                    role: "user",
+                    content: `
+Dữ liệu hệ thống (đã tóm tắt):
+${JSON.stringify(filteredSummary, null, 2)}
+
+Câu hỏi:
+${question}
+`
+                }
+            ]
+        });
+
+        // ===== 7. LOG AI =====
+        await db.ref("AI_Logs").push({
+            userId,
+            role,
+            question,
+            time: Date.now()
+        });
+
+        res.json({
+            role,
+            answer: completion.choices[0].message.content,
+            summary: filteredSummary
+        });
+
     } catch (err) {
-        console.error(err);
-        res.status(500).send("Lỗi server khi thanh toán tác giả");
+        console.error("AI ERROR:", err);
+        res.status(500).json({ error: "AI processing failed" });
     }
 });
 
-app.get('/success-author', async (req, res) => {
-    const { PayerID: payerId, paymentId, userId, amount } = req.query;
 
-    const execute_payment_json = {
-        payer_id: payerId,
-        transactions: [{ amount: { currency: 'USD', total: amount } }],
-    };
 
-    paypal.payment.execute(paymentId, execute_payment_json, async (error, payment) => {
-        if (error) return res.send('❌ Thanh toán thất bại');
-
-        // ===== Cập nhật sách đã thanh toán =====
-        const booksRef = db.ref("Books");
-        const booksSnapshot = await booksRef.once('value');
-        const books = booksSnapshot.val() || {};
-
-        for (const [bookId, book] of Object.entries(books)) {
-            if (book.UploaderId === userId && book.IsVIP && !book.IsPaid) {
-                await db.ref(`Books/${bookId}`).update({ IsPaid: true });
-            }
-        }
-
-        // ===== Thêm thông báo cho tác giả =====
-        const notifRef = db.ref(`Notifications/${userId}`);
-        const newNotif = {
-            createdAt: Date.now(),
-            message: `Người quản trị đã thanh toán quyền lợi của bạn (${amount} USD)`,
-            read: false,
-            title: "Bạn vừa nhận tiền từ sách VIP",
-            type: "author_payment",
-        };
-        await notifRef.push(newNotif);
-
-        res.send(`
-      <h2>Thanh toán quyền lợi tác giả thành công!</h2>
-      <p>Số tiền: $${amount} đã chuyển vào PayPal của tác giả.</p>
-      <a href="booknet://home">Quay lại ứng dụng</a>
-    `);
-    });
+if (!process.env.OPENAI_API_KEY) {
+    console.error("❌ Thiếu OPENAI_API_KEY");
+}
+app.get("/", (req, res) => {
+    res.send("✅ Booknet Payment + AI Server is running");
 });
+function getSystemPrompt(role) {
+    if (role === "admin") {
+        return `
+Bạn là AI trợ lý QUẢN TRỊ cho hệ thống đọc sách Booknet.
+
+Nhiệm vụ:
+- Phân tích số liệu hệ thống
+- Trình bày báo cáo rõ ràng, có số liệu
+- Phát hiện vấn đề tiềm ẩn
+- Đề xuất cải thiện hệ thống
+- Trả lời theo phong cách báo cáo quản trị
+`;
+    }
+
+    return `
+Bạn là AI trợ lý đọc sách Booknet cho người dùng.
+
+Nhiệm vụ:
+- Gợi ý sách phù hợp
+- Trả lời câu hỏi về sách
+- Giải thích dữ liệu một cách đơn giản
+- KHÔNG tiết lộ dữ liệu nội bộ hệ thống
+`;
+}
