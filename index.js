@@ -10,7 +10,6 @@ function filterSummaryByRole(summary, role) {
     };
 }
 
-const role = (userData.Role || "user").toLowerCase(); // luôn lowercase
 
 const express = require('express');
 const paypal = require('paypal-rest-sdk');
@@ -263,8 +262,7 @@ app.post("/ai-ask", async (req, res) => {
         if (!userData) {
             return res.status(404).json({ error: "User không tồn tại" });
         }
-
-        const role = userData.Role || "user";
+        const role = (userData.Role || "user").toLowerCase(); // luôn lowercase
 
         // ===== 2. LOAD DỮ LIỆU =====
         const [
