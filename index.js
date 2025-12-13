@@ -1,12 +1,24 @@
 function filterSummaryByRole(summary, role) {
-    if (role === "admin") return summary; // admin nhận tất cả dữ liệu
+    if (role === "admin") {
+        // admin nhận tất cả dữ liệu chi tiết
+        return summary;
+    }
 
-    // User chỉ thấy dữ liệu KHÔNG NHẠY CẢM
+    // user chỉ nhận dữ liệu cơ bản
     return {
-        books: summary.books,
-        chapters: summary.chapters,
+        books: {
+            total: summary.books.total,
+            vip: summary.books.vip,
+            paid: summary.books.paid,
+            completed: summary.books.completed,
+            topViewed: summary.books.topViewed
+        },
+        chapters: { total: summary.chapters.total },
         interactions: summary.interactions,
-        usersReading: summary.usersReading
+        usersReading: {
+            totalRecords: summary.usersReading.totalRecords,
+            completedBooks: summary.usersReading.completedBooks
+        }
     };
 }
 
@@ -200,11 +212,27 @@ function summarizeData({
     avatarFrames
 }) {
     const bookList = Object.values(books || {});
+    const chapterList = Object.values(chapters || {});
     const commentList = Object.values(comments || {});
     const ratingList = Object.values(ratings || {});
     const paymentList = Object.values(payments || {});
     const historyList = Object.values(readingHistory || {});
     const frameList = Object.values(avatarFrames || {});
+
+    // Tổng hợp chi tiết sách (tên, tác giả, vip/paid, views)
+    const detailedBooks = bookList.map(b => ({
+        Id: b.Id,
+        Title: b.Title,
+        AuthorId: b.AuthorId,
+        IsVIP: b.IsVIP,
+        IsPaid: b.IsPaid,
+        IsCompleted: b.IsCompleted,
+        Views: b.Views || 0,
+        Chapters: chapterList.filter(c => c.BookId === b.Id).map(c => ({
+            Id: c.Id,
+            Title: c.Title
+        }))
+    }));
 
     return {
         books: {
@@ -215,30 +243,33 @@ function summarizeData({
             topViewed: bookList
                 .sort((a, b) => (b.Views || 0) - (a.Views || 0))
                 .slice(0, 5)
-                .map(b => b.Title)
+                .map(b => b.Title),
+            detailed: detailedBooks // THÊM chi tiết cho admin
         },
-
         chapters: {
-            total: Object.keys(chapters || {}).length
+            total: chapterList.length,
+            detailed: chapterList.map(c => ({
+                Id: c.Id,
+                Title: c.Title,
+                BookId: c.BookId
+            }))
         },
-
         interactions: {
             comments: commentList.length,
             ratings: ratingList.length,
             favorites: Object.keys(favorites || {}).length
         },
-
         usersReading: {
             totalRecords: historyList.length,
-            completedBooks: historyList.filter(h => h.IsCompleted).length
+            completedBooks: historyList.filter(h => h.IsCompleted).length,
+            detailed: historyList // admin có thể xem chi tiết từng user
         },
-
         revenue: {
             totalUSD: paymentList.reduce((sum, p) => sum + (p.amount || 0), 0),
             totalXu: paymentList.reduce((sum, p) => sum + (p.xuReceived || 0), 0),
-            totalPayments: paymentList.length
+            totalPayments: paymentList.length,
+            detailed: paymentList // admin xem chi tiết từng giao dịch
         },
-
         avatarFrames: {
             total: frameList.length,
             vip: frameList.filter(f => f.Type === "vip").length,
