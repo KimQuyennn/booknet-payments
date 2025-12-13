@@ -1,5 +1,5 @@
 function filterSummaryByRole(summary, role) {
-    if (role === "admin") return summary;
+    if (role === "admin") return summary; // admin nhận tất cả dữ liệu
 
     // User chỉ thấy dữ liệu KHÔNG NHẠY CẢM
     return {
@@ -9,6 +9,8 @@ function filterSummaryByRole(summary, role) {
         usersReading: summary.usersReading
     };
 }
+
+const role = (userData.Role || "user").toLowerCase(); // luôn lowercase
 
 const express = require('express');
 const paypal = require('paypal-rest-sdk');
